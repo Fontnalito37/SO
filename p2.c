@@ -676,7 +676,7 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("  autores pid pwd chdir date sysinfo help\n");
         printf("  makefile makedir open close listopen dup lseek readstr writestr\n");
         printf("  delete deltree listfile list exec pplano splano\n");
-        printf("  allocate deallocate recurse memfill memdump\n");
+        printf("  allocate deallocate i-o recurse memfill memdump\n");
         printf("  exit bye fin quit\n");
         return;
     }
@@ -715,6 +715,8 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("readstr [df] [cont]: Lee 'cont' bytes del descriptor 'df' y los muestra por pantalla.\n");
     else if (!strcmp(arg[0], "writestr"))
         printf("writestr [df] [str]: Escribe la cadena 'str' en el descriptor 'df'.\n");
+    else if (!strcmp(arg[0], "i-o"))
+        printf("i-o [read|write] [-o] f addr cnt: Entrada y salida entre archivos y direcciones de memoria.\n");
     else if (!strcmp(arg[0], "recurse"))
         printf("recurse n: Ejecuta la funcion recursiva n veces e imprime las direcciones de sus variables.\n");
     else if (!strcmp(arg[0], "memfill"))
@@ -1424,6 +1426,62 @@ void Cmd_deallocate(char *arg[], tShellLists *context)
     }
 }
 
+void Cmd_io(char *arg[], tShellLists *context) {
+    (void)context;
+    int f, argc, op;
+    bool overwrite = false;
+    char *filename;
+    void *addr;
+    size_t cnt;
+    
+    if (!strcmp(arg[0], "read")) {
+        op = 0;
+        argc = 1;
+    } else if (!strcmp(arg[0], "write")) {
+        op = 1;
+        argc = 1;
+        if (!strcmp(arg[1], "-o")) {
+            argc = 2;
+            overwrite = true;
+        }
+    } else {
+        printf("Uso: i-o [read|write] [-o] f addr cnt\n");
+        return;
+    }
+
+    filename = arg[argc];
+    addr = (void *)strtoul(arg[argc + 1], NULL, 16);
+    cnt = strtoul(arg[argc + 2], NULL, 10);
+
+    if (op == 0) {
+        f = open(filename, O_RDONLY);
+        if (f == -1) {
+            perror("Error al abrir el archivo");
+            return;
+        }
+        ssize_t leer = read(f, addr, cnt);
+        if (leer == -1) {
+            perror("Error al leer del archivo");
+        } else {
+            printf("Leidos %zd bytes desde %s a la direccion %p\n", leer, filename, addr);
+        }
+        close(f);
+    } else if (op == 1) {
+        f = open(filename, O_CREAT | O_WRONLY | (overwrite ? O_TRUNC : 0));
+        if (f == -1) {
+            perror("Error al abrir el archivo");
+            return;
+        }
+        ssize_t escr = write(f, addr, cnt);
+        if (escr == -1) {
+            perror("Error al escribir en el archivo");
+        } else {
+            printf("Escritos %zd bytes desde la direccion %p a %s\n", escr, addr, filename);
+        }
+        close(f);
+    }
+}
+
 static void Recursiva(int n)
 {
     char automatico[MAXENTRADA];
@@ -1591,6 +1649,7 @@ static struct COMANDO C[] = {
     {"list", Cmd_list},
     {"allocate", Cmd_allocate},
     {"deallocate", Cmd_deallocate},
+    {"i-o", Cmd_io},
     {"recurse", Cmd_recurse},
     {"memfill", Cmd_memfill},
     {"memdump", Cmd_memdump},
