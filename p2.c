@@ -15,6 +15,9 @@
 #include <pwd.h>
 #include <grp.h>
 #include <dirent.h>
+#include <sys/mman.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include "dynamic_list.h"
 #include "mem_list.h"
 
@@ -962,15 +965,444 @@ void Cmd_list(char *arg[], tShellLists *context)
 
 void Cmd_allocate(char *arg[], tShellLists *context)
 {
+    // Declaramos aquí las variables que pueden necesitar los distintos modos.
+    char *fin;
+    long tam, claveNumero;
+    int id, proteccion, modo, fd;
+    struct shmid_ds datos;
+    struct stat st;
+    void *direccion;
+    size_t i;
+    tItemM bloque;
+
     if (arg[0] == NULL)
     {
+        // Sin opciones, mostramos los bloques que ya reservó allocate.
+        printf("******Lista de bloques asignados para el proceso %d\n", (int)getpid());
         printListM(context->memoria, T_TODOS);
     }
     else
     {
-        if (!strcmp(arg[0], "malloc"))
+        if (!strcmp(arg[0], "-malloc"))
         {
+            // Para malloc necesitamos exactamente el tamaño que se quiere reservar.
+            if (arg[1] == NULL || arg[2] != NULL)
+            {
+                printf("Uso: allocate -malloc tamaño\n");
+                return;
+            }
+
+            // strtol convierte el texto a número y deja en fin lo que no pudo convertir.
+            errno = 0;
+            tam = strtol(arg[1], &fin, 10);
+            // Rechazamos texto inválido, tamaños no positivos y números demasiado grandes.
+            if (errno == ERANGE || fin == arg[1] || *fin != '\0' || tam <= 0)
+            {
+                printf("Tamaño no válido: %s\n", arg[1]);
+                return;
+            }
+
+            // Reservamos la memoria y preparamos los datos que guardaremos sobre el bloque.
+            bloque = (tItemM){0};
+            bloque.dir = malloc((size_t)tam);
+            if (bloque.dir == NULL)
+            {
+                perror("malloc");
+                return;
+            }
+
+            bloque.tam = (size_t)tam;
+            bloque.hora = time(NULL);
+            bloque.tipo = T_MALLOC;
+
+            // Si no se puede añadir a la lista, liberamos la reserva para no dejarla perdida.
+            if (!insertItemM(bloque, MNULL, &context->memoria))
+            {
+                free(bloque.dir);
+                printf("No se pudo guardar el bloque en la lista\n");
+                return;
+            }
+
+            // Mostramos la misma información básica que presenta la shell de referencia.
+            printf("Asignados %zu bytes en %p\n", bloque.tam, bloque.dir);
         }
+        else if (!strcmp(arg[0], "-createshared"))
+        {
+            if (arg[1] == NULL || arg[2] == NULL || arg[3] != NULL)
+            {
+                printf("Uso: allocate -createshared clave tamaño\n");
+                return;
+            }
+
+            bloque = (tItemM){0};
+
+            // Convertimos la clave y el tamaño que escribió el usuario.
+            errno = 0;
+            claveNumero = strtol(arg[1], &fin, 0);
+            if (errno == ERANGE || fin == arg[1] || *fin != '\0')
+            {
+                printf("Clave no válida: %s\n", arg[1]);
+                return;
+            }
+            errno = 0;
+            tam = strtol(arg[2], &fin, 10);
+            if (errno == ERANGE || fin == arg[2] || *fin != '\0' || tam <= 0)
+            {
+                printf("Tamaño no válido: %s\n", arg[2]);
+                return;
+            }
+
+            // shmget crea un segmento nuevo; IPC_EXCL hace que falle si la clave ya existe.
+            id = shmget((key_t)claveNumero, (size_t)tam, IPC_CREAT | IPC_EXCL | 0777);
+            if (id == -1)
+            {
+                perror("shmget");
+                return;
+            }
+            // shmat conecta el segmento al proceso y devuelve su dirección.
+            bloque.dir = shmat(id, NULL, 0);
+            if (bloque.dir == (void *)-1)
+            {
+                perror("shmat");
+                // IPC_RMID elimina el segmento nuevo que no se pudo conectar.
+                shmctl(id, IPC_RMID, NULL);
+                return;
+            }
+
+            bloque.tam = (size_t)tam;
+            bloque.hora = time(NULL);
+            bloque.tipo = T_SHARED;
+            bloque.clave = (key_t)claveNumero;
+
+            // Guardamos la conexión para poder desconectarla más adelante.
+            if (!insertItemM(bloque, MNULL, &context->memoria))
+            {
+                // Quitamos la conexión y eliminamos el segmento que acabamos de crear.
+                shmdt(bloque.dir);
+                shmctl(id, IPC_RMID, NULL);
+                printf("No se pudo guardar el bloque en la lista\n");
+                return;
+            }
+            printf("Asignados %zu bytes en %p\n", bloque.tam, bloque.dir);
+        }
+        else if (!strcmp(arg[0], "-shared"))
+        {
+            if (arg[1] == NULL || arg[2] != NULL)
+            {
+                printf("Uso: allocate -shared clave\n");
+                return;
+            }
+
+            bloque = (tItemM){0};
+
+            // Convertimos la clave para localizar el segmento que ya existe.
+            errno = 0;
+            claveNumero = strtol(arg[1], &fin, 0);
+            if (errno == ERANGE || fin == arg[1] || *fin != '\0')
+            {
+                printf("Clave no válida: %s\n", arg[1]);
+                return;
+            }
+            // Con tamaño 0 y sin IPC_CREAT, shmget busca un segmento que ya exista.
+            id = shmget((key_t)claveNumero, 0, 0777);
+            if (id == -1)
+            {
+                perror("shmget");
+                return;
+            }
+            // shmctl con IPC_STAT consulta los datos del segmento, incluido su tamaño.
+            if (shmctl(id, IPC_STAT, &datos) == -1)
+            {
+                perror("shmctl");
+                return;
+            }
+            // shmat conecta este proceso al segmento encontrado.
+            bloque.dir = shmat(id, NULL, 0);
+            if (bloque.dir == (void *)-1)
+            {
+                perror("shmat");
+                return;
+            }
+
+            bloque.tam = datos.shm_segsz;
+            bloque.hora = time(NULL);
+            bloque.tipo = T_SHARED;
+            bloque.clave = (key_t)claveNumero;
+
+            // Registramos también los segmentos existentes a los que nos conectamos.
+            if (!insertItemM(bloque, MNULL, &context->memoria))
+            {
+                // shmdt desconecta este proceso; el segmento compartido sigue existiendo.
+                shmdt(bloque.dir);
+                printf("No se pudo guardar el bloque en la lista\n");
+                return;
+            }
+            printf("Memoria compartida de clave %d  en %p\n", (int)bloque.clave, bloque.dir);
+        }
+        else if (!strcmp(arg[0], "-mmap"))
+        {
+            if (arg[1] == NULL || arg[2] == NULL || arg[3] != NULL)
+            {
+                printf("Uso: allocate -mmap fichero permisos\n");
+                return;
+            }
+
+            proteccion = 0;
+            bloque = (tItemM){0};
+
+            // Traducimos r, w y x a los permisos que entiende mmap.
+            for (i = 0; arg[2][i] != '\0'; i++)
+            {
+                if (arg[2][i] == 'r')
+                    proteccion |= PROT_READ;
+                else if (arg[2][i] == 'w')
+                    proteccion |= PROT_WRITE;
+                else if (arg[2][i] == 'x')
+                    proteccion |= PROT_EXEC;
+                else
+                {
+                    printf("Permisos no válidos: %s\n", arg[2]);
+                    return;
+                }
+            }
+
+            // Abrimos con permiso de escritura solo si se pidió w.
+            modo = (proteccion & PROT_WRITE) ? O_RDWR : O_RDONLY;
+            // open devuelve un descriptor que identifica el archivo abierto.
+            fd = open(arg[1], modo);
+            if (fd == -1)
+            {
+                perror(arg[1]);
+                return;
+            }
+            // fstat obtiene el tamaño del archivo usando el descriptor abierto.
+            if (fstat(fd, &st) == -1)
+            {
+                perror("fstat");
+                close(fd);
+                return;
+            }
+            if (st.st_size <= 0)
+            {
+                printf("El fichero está vacío\n");
+                close(fd);
+                return;
+            }
+
+            // Mapeamos el contenido del archivo desde el principio.
+            // mmap coloca el contenido del archivo dentro del espacio de memoria del proceso.
+            direccion = mmap(NULL, (size_t)st.st_size, proteccion, MAP_PRIVATE, fd, 0);
+            if (direccion == MAP_FAILED)
+            {
+                perror("mmap");
+                close(fd);
+                return;
+            }
+
+            bloque.dir = direccion;
+            bloque.tam = (size_t)st.st_size;
+            bloque.hora = time(NULL);
+            bloque.tipo = T_MMAP;
+            bloque.df = fd;
+            strncpy(bloque.fichero, arg[1], MAXNOMBRE - 1);
+            bloque.fichero[MAXNOMBRE - 1] = '\0';
+
+            // Conservamos el descriptor abierto para poder cerrar el mapeo después.
+            if (!insertItemM(bloque, MNULL, &context->memoria))
+            {
+                munmap(direccion, bloque.tam);
+                close(fd);
+                printf("No se pudo guardar el bloque en la lista\n");
+                return;
+            }
+            printf("fichero %s mapeado en %p\n", bloque.fichero, bloque.dir);
+        }
+        else
+        {
+            printf("Uso: allocate [-malloc|-createshared|-shared|-mmap] ...\n");
+        }
+    }
+}
+
+void Cmd_deallocate(char *arg[], tShellLists *context)
+{
+    // Estas variables sirven para identificar el bloque que se quiere liberar.
+    char *fin;
+    long valor;
+    key_t clave;
+    int id;
+    void *direccion;
+    tPosM pos;
+    tItemM bloque;
+
+    if (arg[0] == NULL)
+    {
+        // Sin opciones, mostramos la lista de bloques asignados.
+        printf("******Lista de bloques asignados para el proceso %d\n", (int)getpid());
+        printListM(context->memoria, T_TODOS);
+        return;
+    }
+
+    if (!strcmp(arg[0], "-malloc"))
+    {
+        if (arg[1] == NULL || arg[2] != NULL)
+        {
+            printf("Uso: deallocate -malloc tamaño\n");
+            return;
+        }
+
+        // Convertimos el tamaño y comprobamos que sea válido.
+        errno = 0;
+        valor = strtol(arg[1], &fin, 10);
+        if (errno == ERANGE || fin == arg[1] || *fin != '\0' || valor <= 0)
+        {
+            printf("Tamaño no válido: %s\n", arg[1]);
+            return;
+        }
+
+        pos = findBySizeM((size_t)valor, context->memoria);
+        if (pos == MNULL)
+        {
+            printf("No hay bloque de ese tamano asignado con malloc\n");
+            return;
+        }
+
+        bloque = getItemM(pos, context->memoria);
+        // free devuelve al gestor el bloque reservado con malloc.
+        free(bloque.dir);
+        deleteAtPositionM(pos, &context->memoria);
+    }
+    else if (!strcmp(arg[0], "-shared"))
+    {
+        if (arg[1] == NULL || arg[2] != NULL)
+        {
+            printf("Uso: deallocate -shared clave\n");
+            return;
+        }
+
+        // Convertimos la clave para buscar el segmento conectado por este proceso.
+        errno = 0;
+        valor = strtol(arg[1], &fin, 0);
+        if (errno == ERANGE || fin == arg[1] || *fin != '\0')
+        {
+            printf("Clave no válida: %s\n", arg[1]);
+            return;
+        }
+        clave = (key_t)valor;
+        pos = findByKeyM(clave, context->memoria);
+        if (pos == MNULL)
+        {
+            printf("No hay bloque de esa clave mapeado en el proceso\n");
+            return;
+        }
+
+        bloque = getItemM(pos, context->memoria);
+        // shmdt desconecta este proceso, pero no elimina el segmento del sistema.
+        if (shmdt(bloque.dir) == -1)
+        {
+            perror("shmdt");
+            return;
+        }
+        deleteAtPositionM(pos, &context->memoria);
+    }
+    else if (!strcmp(arg[0], "-delkey"))
+    {
+        if (arg[1] == NULL || arg[2] != NULL)
+        {
+            printf("Uso: deallocate -delkey clave\n");
+            return;
+        }
+
+        // Esta opción solo elimina la clave del sistema; no desconecta el segmento.
+        errno = 0;
+        valor = strtol(arg[1], &fin, 0);
+        if (errno == ERANGE || fin == arg[1] || *fin != '\0' || (key_t)valor == IPC_PRIVATE)
+        {
+            printf("      delkey necesita clave_valida\n");
+            return;
+        }
+        clave = (key_t)valor;
+        id = shmget(clave, 0, 0666);
+        if (id == -1)
+        {
+            perror("shmget: imposible obtener memoria compartida");
+            return;
+        }
+        // IPC_RMID marca el segmento para eliminarlo cuando ya no esté conectado.
+        if (shmctl(id, IPC_RMID, NULL) == -1)
+            perror("shmctl: imposible eliminar memoria compartida");
+    }
+    else if (!strcmp(arg[0], "-mmap"))
+    {
+        if (arg[1] == NULL || arg[2] != NULL)
+        {
+            printf("Uso: deallocate -mmap fichero\n");
+            return;
+        }
+
+        pos = findByFileM(arg[1], context->memoria);
+        if (pos == MNULL)
+        {
+            printf("Fichero %s no mapeado\n", arg[1]);
+            return;
+        }
+
+        bloque = getItemM(pos, context->memoria);
+        // munmap quita el archivo mapeado del espacio de memoria del proceso.
+        if (munmap(bloque.dir, bloque.tam) == -1)
+        {
+            perror("munmap");
+            return;
+        }
+        close(bloque.df);
+        deleteAtPositionM(pos, &context->memoria);
+    }
+    else if (arg[1] == NULL)
+    {
+        // Si no hay una opción, interpretamos el argumento como una dirección.
+        if (sscanf(arg[0], "%p", &direccion) != 1)
+        {
+            printf("Direccion %s no asignada con malloc, shared o mmap\n", arg[0]);
+            return;
+        }
+
+        pos = findByAddrM(direccion, context->memoria);
+        if (pos == MNULL)
+        {
+            printf("Direccion %p no asignada con malloc, shared o mmap\n", direccion);
+            return;
+        }
+
+        bloque = getItemM(pos, context->memoria);
+        if (bloque.tipo == T_MALLOC)
+        {
+            // free libera el bloque malloc encontrado por su dirección.
+            free(bloque.dir);
+        }
+        else if (bloque.tipo == T_SHARED)
+        {
+            // shmdt desconecta este proceso del segmento compartido.
+            if (shmdt(bloque.dir) == -1)
+            {
+                perror("shmdt");
+                return;
+            }
+        }
+        else if (bloque.tipo == T_MMAP)
+        {
+            // munmap deshace el mapeo y después cerramos el archivo asociado.
+            if (munmap(bloque.dir, bloque.tam) == -1)
+            {
+                perror("munmap");
+                return;
+            }
+            close(bloque.df);
+        }
+        deleteAtPositionM(pos, &context->memoria);
+    }
+    else
+    {
+        printf("Uso: deallocate [-malloc|-shared|-delkey|-mmap|addr] ...\n");
     }
 }
 
@@ -1006,6 +1438,7 @@ static struct COMANDO C[] = {
     {"listfile", Cmd_listfile},
     {"list", Cmd_list},
     {"allocate", Cmd_allocate},
+    {"deallocate", Cmd_deallocate},
     {NULL, NULL}, /*NULL marca el final del array*/
 };
 
