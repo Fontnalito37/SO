@@ -15,6 +15,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <dirent.h>
+#include <limits.h>
 #include <sys/mman.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -407,6 +408,16 @@ void ProcesarDirectorio(const char *dir, int corto, int enlace, int acc, int hid
     closedir(d);
 }
 
+static void LlenarMemoria(void *direccion, size_t cantidad, unsigned char byte)
+{
+    unsigned char *bytes = direccion;
+    size_t i;
+
+    // Escribimos el mismo byte en cada posición del bloque indicado.
+    for (i = 0; i < cantidad; i++)
+        bytes[i] = byte;
+}
+
 /*********************************************/
 /*************COMANDOS DEL SHELL************************/
 void Cmd_fin(char *arg[], tShellLists *context) /*todos los cmd_ comparten prototipo*/
@@ -665,6 +676,7 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("  autores pid pwd chdir date sysinfo help\n");
         printf("  makefile makedir open close listopen dup lseek readstr writestr\n");
         printf("  delete deltree listfile list exec pplano splano\n");
+        printf("  allocate deallocate recurse memfill memdump\n");
         printf("  exit bye fin quit\n");
         return;
     }
@@ -703,6 +715,12 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("readstr [df] [cont]: Lee 'cont' bytes del descriptor 'df' y los muestra por pantalla.\n");
     else if (!strcmp(arg[0], "writestr"))
         printf("writestr [df] [str]: Escribe la cadena 'str' en el descriptor 'df'.\n");
+    else if (!strcmp(arg[0], "recurse"))
+        printf("recurse n: Ejecuta la funcion recursiva n veces e imprime las direcciones de sus variables.\n");
+    else if (!strcmp(arg[0], "memfill"))
+        printf("memfill direccion cantidad byte: Llena memoria desde la direccion indicada con un byte.\n");
+    else if (!strcmp(arg[0], "memdump"))
+        printf("memdump direccion cantidad: Muestra los caracteres y valores hexadecimales de la memoria indicada.\n");
     else if (!strcmp(arg[0], "delete") || !strcmp(arg[0], "deltree") || !strcmp(arg[0], "listfile") || !strcmp(arg[0], "list"))
         printf("%s: Comando relacionado con la gestion de ficheros y directorios.\n", arg[0]);
     else if (!strcmp(arg[0], "exec") || !strcmp(arg[0], "pplano") || !strcmp(arg[0], "splano"))
@@ -1406,6 +1424,140 @@ void Cmd_deallocate(char *arg[], tShellLists *context)
     }
 }
 
+static void Recursiva(int n)
+{
+    char automatico[MAXENTRADA];
+    static char estatico[MAXENTRADA];
+
+    // Cada llamada tiene su propio array automatico; el estatico conserva la misma dirección.
+    printf("parametro:%3d(%p) array %p, arr estatico %p\n",
+           n, (void *)&n, (void *)automatico, (void *)estatico);
+
+    // Vamos bajando n hasta llegar a cero y terminar la recursión.
+    if (n > 0)
+        Recursiva(n - 1);
+}
+
+void Cmd_recurse(char *arg[], tShellLists *context)
+{
+    char *fin;
+    long n;
+
+    (void)context;
+
+    if (arg[0] == NULL || arg[1] != NULL)
+    {
+        printf("Uso: recurse n\n");
+        return;
+    }
+
+    // Convertimos el argumento y comprobamos que sea un entero no negativo.
+    errno = 0;
+    n = strtol(arg[0], &fin, 10);
+    if (errno == ERANGE || fin == arg[0] || *fin != '\0' || n < 0 || n > INT_MAX)
+    {
+        printf("Parametros incorrectos\n");
+        return;
+    }
+
+    // La rutina recibe un entero; ella misma se encarga de las llamadas recursivas.
+    Recursiva((int)n);
+}
+
+void Cmd_memfill(char *arg[], tShellLists *context)
+{
+    void *direccion;
+    char *fin;
+    int caracteresLeidos;
+    long cantidad, valorByte;
+    unsigned char byte;
+
+    (void)context;
+
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] == NULL || arg[3] != NULL)
+    {
+        printf("Uso: memfill direccion cantidad byte\n");
+        return;
+    }
+
+    // Convertimos la dirección escrita en texto a un puntero.
+    if (sscanf(arg[0], "%p%n", &direccion, &caracteresLeidos) != 1 || arg[0][caracteresLeidos] != '\0')
+    {
+        printf("Direccion no válida: %s\n", arg[0]);
+        return;
+    }
+
+    // La cantidad y el byte se escriben como números decimales.
+    errno = 0;
+    cantidad = strtol(arg[1], &fin, 10);
+    if (errno == ERANGE || fin == arg[1] || *fin != '\0' || cantidad < 0)
+    {
+        printf("Cantidad no válida: %s\n", arg[1]);
+        return;
+    }
+    errno = 0;
+    valorByte = strtol(arg[2], &fin, 10);
+    if (errno == ERANGE || fin == arg[2] || *fin != '\0' || valorByte < 0 || valorByte > 255)
+    {
+        printf("Byte no válido: %s\n", arg[2]);
+        return;
+    }
+
+    byte = (unsigned char)valorByte;
+    // LlenarMemoria escribe la cantidad de bytes solicitada desde la dirección dada.
+    LlenarMemoria(direccion, (size_t)cantidad, byte);
+    printf("Llenando %zu bytes de memoria con el byte  %c(%02X) a partir de la direccion %p\n",
+           (size_t)cantidad, byte, (unsigned int)byte, direccion);
+}
+
+void Cmd_memdump(char *arg[], tShellLists *context)
+{
+    void *direccion;
+    unsigned char *bytes;
+    char *fin;
+    int caracteresLeidos;
+    long cantidad;
+    size_t i;
+
+    (void)context;
+
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL)
+    {
+        printf("Uso: memdump direccion cantidad\n");
+        return;
+    }
+
+    // Convertimos la dirección y la cantidad que indicó el usuario.
+    if (sscanf(arg[0], "%p%n", &direccion, &caracteresLeidos) != 1 || arg[0][caracteresLeidos] != '\0')
+    {
+        printf("Direccion no válida: %s\n", arg[0]);
+        return;
+    }
+    errno = 0;
+    cantidad = strtol(arg[1], &fin, 10);
+    if (errno == ERANGE || fin == arg[1] || *fin != '\0' || cantidad < 0)
+    {
+        printf("Cantidad no válida: %s\n", arg[1]);
+        return;
+    }
+
+    bytes = direccion;
+    printf("Volcando %zu bytes desde la direccion %p\n", (size_t)cantidad, direccion);
+
+    // Mostramos primero los caracteres y luego los mismos bytes en hexadecimal.
+    printf("%p->   ", direccion);
+    for (i = 0; i < (size_t)cantidad; i++)
+    {
+        printf("%c", bytes[i]);
+        if (i + 1 < (size_t)cantidad)
+            printf("  ");
+    }
+    printf("\n%p-> ", direccion);
+    for (i = 0; i < (size_t)cantidad; i++)
+        printf(" %02X", (unsigned int)bytes[i]);
+    printf("\n");
+}
+
 /**************************SHELL**************************/
 
 static struct COMANDO C[] = {
@@ -1439,6 +1591,9 @@ static struct COMANDO C[] = {
     {"list", Cmd_list},
     {"allocate", Cmd_allocate},
     {"deallocate", Cmd_deallocate},
+    {"recurse", Cmd_recurse},
+    {"memfill", Cmd_memfill},
+    {"memdump", Cmd_memdump},
     {NULL, NULL}, /*NULL marca el final del array*/
 };
 
