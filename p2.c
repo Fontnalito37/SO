@@ -16,6 +16,7 @@
 #include <grp.h>
 #include <dirent.h>
 #include <limits.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -37,6 +38,13 @@ struct COMANDO
     char *nombre;
     void (*funcion)(char **, tShellLists *);
 };
+
+int variableGlobalInicializada1 = 1;
+int variableGlobalInicializada2 = 2;
+int variableGlobalInicializada3 = 3;
+int variableGlobalNoInicializada1;
+int variableGlobalNoInicializada2;
+int variableGlobalNoInicializada3;
 
 void MostrarDirActual()
 {
@@ -64,6 +72,8 @@ void Proceso(char *tr[], int splano)
 {
     pid_t pid;
     void Cmd_exec(char **, tShellLists *);
+    if (tr[0] == NULL)
+        return;
     int background = splano || ComprobarSegundoPlano(tr);
     if ((pid = fork()) == -1)
     {
@@ -420,10 +430,37 @@ static void LlenarMemoria(void *direccion, size_t cantidad, unsigned char byte)
 
 /*********************************************/
 /*************COMANDOS DEL SHELL************************/
+static void LiberarRecursos(tShellLists *context)
+{
+    tPosL p;
+    tPosM m;
+    tItemM bloque;
+
+    for (p = first(context->abiertos); p != LNULL; p = next(p, context->abiertos))
+        if (p->data.df > STDERR_FILENO)
+            close(p->data.df);
+    deleteList(&context->abiertos);
+
+    for (m = firstM(context->memoria); m != MNULL; m = nextM(m, context->memoria))
+    {
+        bloque = getItemM(m, context->memoria);
+        if (bloque.tipo == T_MALLOC)
+            free(bloque.dir);
+        else if (bloque.tipo == T_SHARED)
+            shmdt(bloque.dir);
+        else if (bloque.tipo == T_MMAP)
+        {
+            munmap(bloque.dir, bloque.tam);
+            close(bloque.df);
+        }
+    }
+    deleteListM(&context->memoria);
+}
+
 void Cmd_fin(char *arg[], tShellLists *context) /*todos los cmd_ comparten prototipo*/
 {
     (void)arg;
-    deleteList(&context->abiertos);
+    LiberarRecursos(context);
     exit(0);
 }
 
@@ -450,6 +487,11 @@ void Cmd_autores(char *arg[], tShellLists *context)
 void Cmd_exec(char *arg[], tShellLists *context)
 {
     (void)context;
+    if (arg[0] == NULL)
+    {
+        printf("Uso: exec programa [argumentos...]\n");
+        return;
+    }
     if (execvp(arg[0], arg) == -1)
         perror("Imposible ejecutar");
 }
@@ -676,7 +718,7 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("  autores pid pwd chdir date sysinfo help\n");
         printf("  makefile makedir open close listopen dup lseek readstr writestr\n");
         printf("  delete deltree listfile list exec pplano splano\n");
-        printf("  allocate deallocate i-o recurse memfill memdump\n");
+        printf("  allocate deallocate i-o recurse memfill memdump memory\n");
         printf("  exit bye fin quit\n");
         return;
     }
@@ -727,6 +769,8 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("memfill direccion cantidad byte: Llena memoria desde la direccion indicada con un byte.\n");
     else if (!strcmp(arg[0], "memdump"))
         printf("memdump direccion cantidad: Muestra los caracteres y valores hexadecimales de la memoria indicada.\n");
+    else if (!strcmp(arg[0], "memory"))
+        printf("memory [-blocks|-funcs|-vars|-all|-pmap]: Muestra informacion de la memoria del shell.\n");
     else if (!strcmp(arg[0], "delete") || !strcmp(arg[0], "deltree") || !strcmp(arg[0], "listfile") || !strcmp(arg[0], "list"))
         printf("%s: Comando relacionado con la gestion de ficheros y directorios.\n", arg[0]);
     else if (!strcmp(arg[0], "exec") || !strcmp(arg[0], "pplano") || !strcmp(arg[0], "splano"))
@@ -742,19 +786,22 @@ void Cmd_readstr(char *arg[], tShellLists *context)
     long df, cont;
     ssize_t n;
 
-    if (arg[0] == NULL || arg[1] == NULL)
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL)
     {
         printf("Parametros incorrectos\n");
         return;
     }
+    errno = 0;
     df = strtol(arg[0], &fin, 10);
-    if (*fin != '\0' || df < 0)
+    if (errno == ERANGE || fin == arg[0] || *fin != '\0' || df < 0 || df > INT_MAX)
     {
         printf("Parametros incorrectos\n");
         return;
     }
+    errno = 0;
     cont = strtol(arg[1], &fin, 10);
-    if (*fin != '\0' || cont <= 0)
+    if (errno == ERANGE || fin == arg[1] || *fin != '\0' || cont <= 0 ||
+        (unsigned long long)cont >= (unsigned long long)SIZE_MAX)
     {
         printf("Parametros incorrectos\n");
         return;
@@ -812,13 +859,14 @@ void Cmd_lseek(char *arg[], tShellLists *context)
     off_t res;
     int ref;
 
-    if (arg[0] == NULL || arg[1] == NULL || arg[2] == NULL)
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] == NULL || arg[3] != NULL)
     {
         printf("Parametros incorrectos\n");
         return;
     }
+    errno = 0;
     df = strtol(arg[0], &fin, 10);
-    if (*fin != '\0' || df < 0)
+    if (errno == ERANGE || fin == arg[0] || *fin != '\0' || df < 0 || df > INT_MAX)
     {
         printf("Parametros incorrectos\n");
         return;
@@ -1430,56 +1478,99 @@ void Cmd_deallocate(char *arg[], tShellLists *context)
     }
 }
 
-void Cmd_io(char *arg[], tShellLists *context) {
+void Cmd_io(char *arg[], tShellLists *context)
+{
     (void)context;
-    int f, argc, op;
+    int f, indice;
+    bool lectura;
     bool overwrite = false;
     char *filename;
     void *addr;
     size_t cnt;
-    
-    if (!strcmp(arg[0], "read")) {
-        op = 0;
-        argc = 1;
-    } else if (!strcmp(arg[0], "write")) {
-        op = 1;
-        argc = 1;
-        if (!strcmp(arg[1], "-o")) {
-            argc = 2;
-            overwrite = true;
-        }
-    } else {
+    char *fin;
+    unsigned long valor;
+
+    if (arg[0] == NULL)
+    {
         printf("Uso: i-o [read|write] [-o] f addr cnt\n");
         return;
     }
 
-    filename = arg[argc];
-    addr = (void *)strtoul(arg[argc + 1], NULL, 16);
-    cnt = strtoul(arg[argc + 2], NULL, 10);
+    lectura = !strcmp(arg[0], "read");
+    if (!lectura && strcmp(arg[0], "write"))
+    {
+        printf("Uso: i-o [read|write] [-o] f addr cnt\n");
+        return;
+    }
 
-    if (op == 0) {
+    indice = 1;
+    if (!lectura && arg[indice] != NULL && !strcmp(arg[indice], "-o"))
+    {
+        indice++;
+        overwrite = true;
+    }
+
+    if (arg[indice] == NULL || arg[indice + 1] == NULL || arg[indice + 2] == NULL || arg[indice + 3] != NULL)
+    {
+        printf("Uso: i-o [read|write] [-o] f addr cnt\n");
+        return;
+    }
+
+    filename = arg[indice];
+    errno = 0;
+    valor = strtoul(arg[indice + 1], &fin, 16);
+    if (arg[indice + 1][0] == '-' || errno == ERANGE || fin == arg[indice + 1] ||
+        *fin != '\0' || valor > UINTPTR_MAX)
+    {
+        printf("Direccion no valida: %s\n", arg[indice + 1]);
+        return;
+    }
+    addr = (void *)(uintptr_t)valor;
+
+    errno = 0;
+    valor = strtoul(arg[indice + 2], &fin, 10);
+    if (arg[indice + 2][0] == '-' || errno == ERANGE || fin == arg[indice + 2] ||
+        *fin != '\0' || valor > SIZE_MAX)
+    {
+        printf("Cantidad no valida: %s\n", arg[indice + 2]);
+        return;
+    }
+    cnt = (size_t)valor;
+
+    if (lectura)
+    {
         f = open(filename, O_RDONLY);
-        if (f == -1) {
+        if (f == -1)
+        {
             perror("Error al abrir el archivo");
             return;
         }
         ssize_t leer = read(f, addr, cnt);
-        if (leer == -1) {
+        if (leer == -1)
+        {
             perror("Error al leer del archivo");
-        } else {
+        }
+        else
+        {
             printf("Leidos %zd bytes desde %s a la direccion %p\n", leer, filename, addr);
         }
         close(f);
-    } else if (op == 1) {
-        f = open(filename, O_CREAT | O_WRONLY | (overwrite ? O_TRUNC : 0));
-        if (f == -1) {
+    }
+    else
+    {
+        f = open(filename, O_CREAT | O_WRONLY | (overwrite ? O_TRUNC : 0), 0644);
+        if (f == -1)
+        {
             perror("Error al abrir el archivo");
             return;
         }
         ssize_t escr = write(f, addr, cnt);
-        if (escr == -1) {
+        if (escr == -1)
+        {
             perror("Error al escribir en el archivo");
-        } else {
+        }
+        else
+        {
             printf("Escritos %zd bytes desde la direccion %p a %s\n", escr, addr, filename);
         }
         close(f);
@@ -1569,7 +1660,6 @@ void Cmd_recurse(char *arg[], tShellLists *context)
         printf("Parametros incorrectos\n");
         return;
     }
-
     // La rutina recibe un entero; ella misma se encarga de las llamadas recursivas.
     Recursiva((int)n);
 }
@@ -1668,6 +1758,123 @@ void Cmd_memdump(char *arg[], tShellLists *context)
     printf("\n");
 }
 
+static void Do_pmap(void)
+{
+    pid_t pid;
+    char elpid[32];
+    char *argv[4] = {"pmap", elpid, NULL, NULL};
+
+    snprintf(elpid, sizeof(elpid), "%d", (int)getpid());
+    pid = fork();
+    if (pid == -1)
+    {
+        perror("Imposible crear proceso para mostrar el mapa de memoria");
+        return;
+    }
+    if (pid == 0)
+    {
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar pmap");
+
+        argv[0] = "procstat";
+        argv[1] = "vm";
+        argv[2] = elpid;
+        argv[3] = NULL;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar procstat");
+
+        argv[0] = "procmap";
+        argv[1] = elpid;
+        argv[2] = NULL;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar procmap");
+
+        argv[0] = "vmmap";
+        argv[1] = "-interleave";
+        argv[2] = elpid;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar vmmap");
+        exit(EXIT_FAILURE);
+    }
+    waitpid(pid, NULL, 0);
+}
+
+void Cmd_memory(char *arg[], tShellLists *context)
+{
+    int automaticaInicializada = 1;
+    int automatica;
+    char otraAutomatica = 'A';
+    static int estaticaInicializada1 = 1;
+    static int estaticaInicializada2 = 2;
+    static int estaticaInicializada3 = 3;
+    static int estaticaNoInicializada1;
+    static int estaticaNoInicializada2;
+    static int estaticaNoInicializada3;
+    int bloques = 0, funciones = 0, variables = 0, mapa = 0;
+
+    if (arg[0] == NULL || !strcmp(arg[0], "-all"))
+    {
+        bloques = funciones = variables = 1;
+    }
+    else if (arg[1] != NULL)
+    {
+        printf("Uso: memory [-blocks|-funcs|-vars|-all|-pmap]\n");
+        return;
+    }
+    else if (!strcmp(arg[0], "-blocks"))
+        bloques = 1;
+    else if (!strcmp(arg[0], "-funcs"))
+        funciones = 1;
+    else if (!strcmp(arg[0], "-vars"))
+        variables = 1;
+    else if (!strcmp(arg[0], "-pmap"))
+        mapa = 1;
+    else
+    {
+        printf("Uso: memory [-blocks|-funcs|-vars|-all|-pmap]\n");
+        return;
+    }
+
+    if (bloques)
+    {
+        printf("******Lista de bloques asignados para el proceso %d\n", (int)getpid());
+        printListM(context->memoria, T_TODOS);
+    }
+
+    if (funciones)
+    {
+        printf("Funciones del shell:\n");
+        printf("  Cmd_allocate: %p\n", (void *)Cmd_allocate);
+        printf("  Cmd_memfill:  %p\n", (void *)Cmd_memfill);
+        printf("  Cmd_memdump:  %p\n", (void *)Cmd_memdump);
+        printf("Funciones de biblioteca:\n");
+        printf("  malloc:       %p\n", (void *)malloc);
+        printf("  free:         %p\n", (void *)free);
+        printf("  printf:       %p\n", (void *)printf);
+    }
+
+    if (variables)
+    {
+        printf("Variables automaticas:\n");
+        printf("  inicializada:     %p\n", (void *)&automaticaInicializada);
+        printf("  sin inicializar:  %p\n", (void *)&automatica);
+        printf("  otra:             %p\n", (void *)&otraAutomatica);
+        printf("Variables estaticas:\n");
+        printf("  inicializadas:    %p, %p, %p\n",
+               (void *)&estaticaInicializada1, (void *)&estaticaInicializada2, (void *)&estaticaInicializada3);
+        printf("  sin inicializar:  %p, %p, %p\n",
+               (void *)&estaticaNoInicializada1, (void *)&estaticaNoInicializada2, (void *)&estaticaNoInicializada3);
+        printf("Variables globales:\n");
+        printf("  inicializadas:    %p, %p, %p\n",
+               (void *)&variableGlobalInicializada1, (void *)&variableGlobalInicializada2, (void *)&variableGlobalInicializada3);
+        printf("  sin inicializar:  %p, %p, %p\n",
+               (void *)&variableGlobalNoInicializada1, (void *)&variableGlobalNoInicializada2, (void *)&variableGlobalNoInicializada3);
+    }
+
+    if (mapa)
+        Do_pmap();
+}
+
 /**************************SHELL**************************/
 
 static struct COMANDO C[] = {
@@ -1707,6 +1914,7 @@ static struct COMANDO C[] = {
     {"recurse", Cmd_recurse},
     {"memfill", Cmd_memfill},
     {"memdump", Cmd_memdump},
+    {"memory", Cmd_memory},
     {NULL, NULL}, /*NULL marca el final del array*/
 };
 
@@ -1736,7 +1944,7 @@ int TrocearCadena(char *cadena, char *trozos[])
 }
 void ProcesarEntrada(char *entrada, tShellLists *context)
 {
-    char *tr[MAXENTRADA / 2];
+    char *tr[MAXENTRADA / 2 + 1];
     if (TrocearCadena(entrada, tr) == 0) /*no hay nada*/
         return;
     DecidirComando(tr, context);
@@ -1756,8 +1964,7 @@ int main(void)
         if (fgets(entrada, MAXENTRADA, stdin) == NULL)
         {
             printf("\n");
-            deleteList(&context.abiertos);
-            deleteListM(&context.memoria);
+            LiberarRecursos(&context);
             break;
         }
         ProcesarEntrada(entrada, &context);
