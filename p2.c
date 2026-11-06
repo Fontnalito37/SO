@@ -428,8 +428,6 @@ static void LlenarMemoria(void *direccion, size_t cantidad, unsigned char byte)
         bytes[i] = byte;
 }
 
-/*********************************************/
-/*************COMANDOS DEL SHELL************************/
 static void LiberarRecursos(tShellLists *context)
 {
     tPosL p;
@@ -457,6 +455,49 @@ static void LiberarRecursos(tShellLists *context)
     deleteListM(&context->memoria);
 }
 
+static void Do_pmap(void)
+{
+    pid_t pid;
+    char elpid[32];
+    char *argv[4] = {"pmap", elpid, NULL, NULL};
+
+    snprintf(elpid, sizeof(elpid), "%d", (int)getpid());
+    pid = fork();
+    if (pid == -1)
+    {
+        perror("Imposible crear proceso para mostrar el mapa de memoria");
+        return;
+    }
+    if (pid == 0)
+    {
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar pmap");
+
+        argv[0] = "procstat";
+        argv[1] = "vm";
+        argv[2] = elpid;
+        argv[3] = NULL;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar procstat");
+
+        argv[0] = "procmap";
+        argv[1] = elpid;
+        argv[2] = NULL;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar procmap");
+
+        argv[0] = "vmmap";
+        argv[1] = "-interleave";
+        argv[2] = elpid;
+        execvp(argv[0], argv);
+        perror("No se pudo ejecutar vmmap");
+        exit(EXIT_FAILURE);
+    }
+    waitpid(pid, NULL, 0);
+}
+
+/*********************************************/
+/*************COMANDOS DEL SHELL************************/
 void Cmd_fin(char *arg[], tShellLists *context) /*todos los cmd_ comparten prototipo*/
 {
     (void)arg;
@@ -716,7 +757,7 @@ void Cmd_help(char *arg[], tShellLists *context)
     {
         printf("Comandos disponibles:\n");
         printf("  autores pid pwd chdir date sysinfo help\n");
-        printf("  makefile makedir open close listopen dup lseek readstr writestr\n");
+        printf("  makefile makedir open close listopen dup lseek read write readstr writestr\n");
         printf("  delete deltree listfile list exec pplano splano\n");
         printf("  allocate deallocate i-o recurse memfill memdump memory\n");
         printf("  exit bye fin quit\n");
@@ -753,6 +794,10 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("dup [df]: Duplica el descriptor de fichero 'df' y lo anade a la lista.\n");
     else if (!strcmp(arg[0], "lseek"))
         printf("lseek [df] [pos] [ref]: Cambia el offset del descriptor 'df' a 'pos'. ref puede ser SEEK_SET, SEEK_CUR o SEEK_END.\n");
+    else if (!strcmp(arg[0], "read"))
+        printf("read: df addr cont\tTransfiere cont bytes del fichero \n\tdescrito por df a la dirección addr\n");
+    else if (!strcmp(arg[0], "write"))
+        printf("write: df addr cont\tTransfiere cont bytes desde la dirección addr \n\tal fichero descrito por df\n");
     else if (!strcmp(arg[0], "readstr"))
         printf("readstr [df] [cont]: Lee 'cont' bytes del descriptor 'df' y los muestra por pantalla.\n");
     else if (!strcmp(arg[0], "writestr"))
@@ -1577,14 +1622,16 @@ void Cmd_io(char *arg[], tShellLists *context)
     }
 }
 
-void Cmd_read(char *arg[], tShellLists *context) {
+void Cmd_read(char *arg[], tShellLists *context)
+{
     (void)context;
     int df;
     void *addr;
     size_t cont;
     ssize_t leer;
 
-    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL) {
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL)
+    {
         printf("Uso: read df addr cont\n");
         return;
     }
@@ -1594,21 +1641,26 @@ void Cmd_read(char *arg[], tShellLists *context) {
     cont = strtoul(arg[2], NULL, 10);
 
     leer = read(df, addr, cont);
-    if (leer == -1) {
+    if (leer == -1)
+    {
         perror("Error al leer el archivo");
-    } else {
+    }
+    else
+    {
         printf("Leidos %zd bytes desde %s a la direccion %p\n", leer, arg[0], addr);
     }
 }
 
-void Cmd_write(char *arg[], tShellLists *context) {
+void Cmd_write(char *arg[], tShellLists *context)
+{
     (void)context;
     int df;
     void *addr;
     size_t cont;
     ssize_t escr;
 
-    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL) {
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL)
+    {
         printf("Uso: write df addr cont\n");
         return;
     }
@@ -1618,9 +1670,12 @@ void Cmd_write(char *arg[], tShellLists *context) {
     cont = strtoul(arg[2], NULL, 10);
 
     escr = write(df, addr, cont);
-    if (escr == -1) {
+    if (escr == -1)
+    {
         perror("Error al escribir en el archivo");
-    } else {
+    }
+    else
+    {
         printf("Escritos %zd bytes desde la direccion %p a %s\n", escr, addr, arg[0]);
     }
 }
@@ -1756,47 +1811,6 @@ void Cmd_memdump(char *arg[], tShellLists *context)
     for (i = 0; i < (size_t)cantidad; i++)
         printf(" %02X", (unsigned int)bytes[i]);
     printf("\n");
-}
-
-static void Do_pmap(void)
-{
-    pid_t pid;
-    char elpid[32];
-    char *argv[4] = {"pmap", elpid, NULL, NULL};
-
-    snprintf(elpid, sizeof(elpid), "%d", (int)getpid());
-    pid = fork();
-    if (pid == -1)
-    {
-        perror("Imposible crear proceso para mostrar el mapa de memoria");
-        return;
-    }
-    if (pid == 0)
-    {
-        execvp(argv[0], argv);
-        perror("No se pudo ejecutar pmap");
-
-        argv[0] = "procstat";
-        argv[1] = "vm";
-        argv[2] = elpid;
-        argv[3] = NULL;
-        execvp(argv[0], argv);
-        perror("No se pudo ejecutar procstat");
-
-        argv[0] = "procmap";
-        argv[1] = elpid;
-        argv[2] = NULL;
-        execvp(argv[0], argv);
-        perror("No se pudo ejecutar procmap");
-
-        argv[0] = "vmmap";
-        argv[1] = "-interleave";
-        argv[2] = elpid;
-        execvp(argv[0], argv);
-        perror("No se pudo ejecutar vmmap");
-        exit(EXIT_FAILURE);
-    }
-    waitpid(pid, NULL, 0);
 }
 
 void Cmd_memory(char *arg[], tShellLists *context)
