@@ -717,6 +717,10 @@ void Cmd_help(char *arg[], tShellLists *context)
         printf("writestr [df] [str]: Escribe la cadena 'str' en el descriptor 'df'.\n");
     else if (!strcmp(arg[0], "i-o"))
         printf("i-o [read|write] [-o] f addr cnt: Entrada y salida entre archivos y direcciones de memoria.\n");
+    else if (!strcmp(arg[0], "read"))
+        printf("read df addr cont: Lee 'cont' bytes del descriptor 'df' y los transfiere a la direccion 'addr'.\n");
+    else if (!strcmp(arg[0], "write"))
+        printf("write df addr cont: Escribe 'cont' bytes desde la direccion 'addr' en el descriptor 'df'.\n");
     else if (!strcmp(arg[0], "recurse"))
         printf("recurse n: Ejecuta la funcion recursiva n veces e imprime las direcciones de sus variables.\n");
     else if (!strcmp(arg[0], "memfill"))
@@ -1482,6 +1486,54 @@ void Cmd_io(char *arg[], tShellLists *context) {
     }
 }
 
+void Cmd_read(char *arg[], tShellLists *context) {
+    (void)context;
+    int df;
+    void *addr;
+    size_t cont;
+    ssize_t leer;
+
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL) {
+        printf("Uso: read df addr cont\n");
+        return;
+    }
+
+    df = strtol(arg[0], NULL, 10);
+    addr = (void *)strtoul(arg[1], NULL, 16);
+    cont = strtoul(arg[2], NULL, 10);
+
+    leer = read(df, addr, cont);
+    if (leer == -1) {
+        perror("Error al leer el archivo");
+    } else {
+        printf("Leidos %zd bytes desde %s a la direccion %p\n", leer, arg[0], addr);
+    }
+}
+
+void Cmd_write(char *arg[], tShellLists *context) {
+    (void)context;
+    int df;
+    void *addr;
+    size_t cont;
+    ssize_t escr;
+
+    if (arg[0] == NULL || arg[1] == NULL || arg[2] != NULL) {
+        printf("Uso: write df addr cont\n");
+        return;
+    }
+
+    df = strtol(arg[0], NULL, 10);
+    addr = (void *)strtoul(arg[1], NULL, 16);
+    cont = strtoul(arg[2], NULL, 10);
+
+    escr = write(df, addr, cont);
+    if (escr == -1) {
+        perror("Error al escribir en el archivo");
+    } else {
+        printf("Escritos %zd bytes desde la direccion %p a %s\n", escr, addr, arg[0]);
+    }
+}
+
 static void Recursiva(int n)
 {
     char automatico[MAXENTRADA];
@@ -1650,6 +1702,8 @@ static struct COMANDO C[] = {
     {"allocate", Cmd_allocate},
     {"deallocate", Cmd_deallocate},
     {"i-o", Cmd_io},
+    {"read", Cmd_read},
+    {"write", Cmd_write},
     {"recurse", Cmd_recurse},
     {"memfill", Cmd_memfill},
     {"memdump", Cmd_memdump},
